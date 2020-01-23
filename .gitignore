@@ -1,0 +1,12 @@
+checkpoints/*/*.pth
+checkpoints/*/imgs/
+checkpoints/*/iter*.txt
+checkpoints/*.rar
+results/*
+!results/*.txt
+!results/loss/
+video/*
+datasets/
+*.zip
+__pycache__/
+.idea/

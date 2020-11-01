@@ -44,11 +44,12 @@ class CustomDataset(data.Dataset):
         self.norm = torchvision.transforms.Normalize([0.5,0.5,0.5],[0.5,0.5,0.5])
         if self.isGlobal:
             self.transform = torchvision.transforms.Compose([
-            torchvision.transforms.Resize((512, 1024), 0),
+            torchvision.transforms.Resize((256, 512), 0),
             torchvision.transforms.ToTensor()
         ])
         else:
             self.transform = torchvision.transforms.Compose([
+                torchvision.transforms.Resize((512, 1024), 0),
                 torchvision.transforms.ToTensor()
             ])
 

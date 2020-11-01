@@ -1,8 +1,7 @@
 import os
 import numpy as np
 from PIL import Image
-import torch
-
+from matplotlib import pyplot as plt
 
 def log(file, msg):
     with open(file, 'a+') as f:
@@ -117,3 +116,30 @@ class Colorize(object):
             color_image[2][mask[:, 0], mask[:, 1]] = self.cmap[label][2]
 
         return color_image
+
+def plotLossLog(file):
+    epoch_list = []
+    GANLoss_list = []
+    FeatureLoss_list = []
+    with open(file) as f:
+        epoch_line = f.readline()
+        loss_line = f.readline()
+        f.readline()
+        while epoch_line != '':
+            epoch = int(epoch_line.split()[3])
+            epoch_list.append(epoch)
+            loss = loss_line.split('\t')
+            GANLoss_list.append(float(loss[0].split()[1]))
+            FeatureLoss_list.append(float(loss[1].split()[1]))
+
+            epoch_line = f.readline()
+            loss_line = f.readline()
+            f.readline()
+
+    plt.plot(epoch_list, GANLoss_list, label='GANLoss')
+    plt.plot(epoch_list, FeatureLoss_list, label='PatchLoss')
+    plt.legend(loc='best')
+    plt.show()
+
+if __name__ == '__main__':
+    plotLossLog('checkpoints/local/train_log.txt')

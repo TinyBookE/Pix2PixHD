@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torchvision import models
 from torch.autograd import Variable
-from imagePool import ImagePool
+import numpy as np
 
 
 ##################################
@@ -36,34 +36,61 @@ class GlobalGenerator(nn.Module):
         super(GlobalGenerator, self).__init__()
         model = [nn.ReflectionPad2d(3), nn.Conv2d(input_nc, ngf, kernel_size=7),
                  nn.InstanceNorm2d(ngf), nn.ReLU(True)]
+
+        self.net = []
+        self.net.append(nn.Sequential(*model))
+
+        self.n_downsample = 4
         n_downsample = 4
 
         # downsample
         for i in range(n_downsample):
             mult = 2**i
-            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1),
+            model = [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1),
                       nn.InstanceNorm2d(ngf*mult*2), nn.ReLU(True)]
+            self.net.append(nn.Sequential(*model))
 
         # resnet
+        model = []
         mult = 2**n_downsample
         for i in range(9):
             model += [ResnetBlock(ngf * mult, int(ngf * mult / 4))]
-        #)
+        self.net.append(nn.Sequential(*model))
+
         # upsample
         for i in range(n_downsample):
             mult = 2**(n_downsample-i)
-            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult /2),
+            model = [nn.ConvTranspose2d(ngf * mult, int(ngf * mult /2),
                                          kernel_size=3, stride=2, padding=1, output_padding=1),
                       nn.InstanceNorm2d(int(ngf*mult/2)), nn.ReLU(True)]
+            self.net.append(nn.Sequential(*model))
 
-        model += [nn.ReflectionPad2d(3), nn.Conv2d(ngf, output_nc, kernel_size=7), nn.Tanh()]
-        self.model = nn.Sequential(*model)
+        model = [nn.ReflectionPad2d(3), nn.Conv2d(ngf, output_nc, kernel_size=7), nn.Tanh()]
+        self.net.append(nn.Sequential(*model))
+
+        for i in range(len(self.net)):
+            setattr(self, 'model'+str(i), self.net[i])
 
     def forward(self, x):
-        return self.model(x)
+        size = x.size()
+        random_dim = torch.randn((1, 1, size[2], size[3])).cuda()
+        x = torch.cat((x, random_dim), 1)
+        result = [x]
+        for i in range(self.n_downsample+2):
+            model = self.net[i]
+            result.append(model(result[-1]))
+        for i in range(self.n_downsample):
+            model = self.net[i+self.n_downsample+2]
+            result.append(model(result[-1]+result[self.n_downsample-i+1]))
+        final = self.net[-1]
+        return final(result[-1])
+
 
     def get_optimizer(self, lr, fix_global=True):
-        params = self.model.parameters()
+        params = []
+        for i in range(2 * self.n_downsample + 3):
+            models = self.net[i]
+            params += models.parameters()
         optimizer = torch.optim.Adam(params, lr, betas=(0.5,0.999))
         return optimizer
 
@@ -73,8 +100,9 @@ class LocalEnhancer(nn.Module):
         super(LocalEnhancer, self).__init__()
 
         # global
-        globalGenerator = GlobalGenerator(input_nc, output_nc, ngf*2).model
+        globalGenerator = GlobalGenerator(input_nc+1, output_nc, ngf*2).model
         globalGenerator = [globalGenerator[i] for i in range(len(globalGenerator)-3)]
+
 
         # downsample
         model_downsample = [nn.ReflectionPad2d(3), nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0),
@@ -95,7 +123,7 @@ class LocalEnhancer(nn.Module):
         # final
         model_generate = [nn.ReflectionPad2d(3), nn.Conv2d(ngf, output_nc, kernel_size=7), nn.Tanh()]
 
-        self.model_global = nn.Sequential(*globalGenerator)
+        self.model = nn.Sequential(*globalGenerator)
         self.model_downsample = nn.Sequential(*model_downsample)
         self.model_resnet = nn.Sequential(*model_resnet)
         self.model_upsample = nn.Sequential(*model_upsample)
@@ -106,10 +134,10 @@ class LocalEnhancer(nn.Module):
     def forward(self, x):
         downsample_x = self.downsample(x)
 
-        out = self.model_global(downsample_x)
-        out = self.model_downsample(x) + out
-        out = self.model_resnet(out)
-        out = self.model_upsample(out)
+        out_1 = self.model(downsample_x)
+        out_2 = self.model_downsample(x) + out_1
+        out = self.model_resnet(out_2)
+        out = self.model_upsample(out+out_2)
         out = self.model_generate(out)
 
         return out
@@ -117,7 +145,7 @@ class LocalEnhancer(nn.Module):
     def get_optimizer(self, lr, fix_global = True):
         params = []
         if not fix_global:
-            params += self.model_global.parameters()
+            params += self.model.parameters()
         params += self.model_downsample.parameters()
         params += self.model_resnet.parameters()
         params += self.model_upsample.parameters()
@@ -134,12 +162,15 @@ class Discriminator(nn.Module):
         padw = 0 # int(np.ceil((kw - 1.0) / 2))
         sequence = [[nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]]
 
+
         nf = ndf
+
         for n in range(1, 3):
             nf_prev = nf
             nf = min(nf * 2, 512)
             sequence += [[nn.Conv2d(nf_prev, nf, kernel_size=kw, stride=2, padding=padw),
                          nn.InstanceNorm2d(nf), nn.LeakyReLU(0.2, True)]]
+
 
         nf_prev = nf
         nf = min(nf * 2, 512)
@@ -148,8 +179,10 @@ class Discriminator(nn.Module):
 
         sequence += [[nn.Conv2d(nf, 1, kernel_size=kw, stride=1, padding=padw)]]
 
-        self.model = []
-        for i in range(5):
+        sequence += [[nn.AdaptiveAvgPool2d((7,7)), nn.Flatten()]]
+
+        sequence += [[nn.Linear(49, 1), nn.Sigmoid()]]
+        for i in range(7):
             setattr(self, 'model' + str(i), nn.Sequential(*sequence[i]))
 
     def forward(self, x):
@@ -157,6 +190,12 @@ class Discriminator(nn.Module):
         for i in range(5):
             model = getattr(self, 'model'+str(i))
             result.append(model(result[-1]))
+        model = getattr(self, 'model5')
+        final = model(result[-1])
+        model = getattr(self, 'model6')
+        final = model(final)
+        result.append(final)
+
         return result[1:]
 
 
@@ -193,7 +232,7 @@ class Pix2PixHD(nn.Module):
         self.input_nc = input_nc
         # generator
         if net_G == 'global':
-            self.net_G = GlobalGenerator(input_nc, 3)
+            self.net_G = GlobalGenerator(input_nc+1, 3)
         elif net_G == 'local':
             self.net_G = LocalEnhancer(input_nc, 3)
         else:
@@ -209,26 +248,21 @@ class Pix2PixHD(nn.Module):
             self.VGGLoss = VGGLoss()
             self.FeatLoss = nn.L1Loss()
 
-        self.fake_pool = ImagePool(0)
-
     def encode_label(self, label_img, real_img = None):
         size = label_img.size()
         oneHotSize = (size[0], self.input_nc, size[2], size[3])
         oneHot_lable = torch.cuda.FloatTensor(torch.Size(oneHotSize)).zero_()
         oneHot_lable = oneHot_lable.scatter_(1,label_img.data.long().cuda(),1.0)
 
+
         if real_img is not None:
             real_img = Variable(real_img.data.cuda())
 
         return oneHot_lable, real_img
 
-    def discriminate(self, label, img, use_pool=False):
+    def discriminate(self, label, img):
         concat = torch.cat((label, img.detach()), dim=1)
-        if use_pool:
-            fake_query = self.fake_pool.query(concat)
-            return self.net_D(fake_query)
-        else:
-            return self.net_D(concat)
+        return self.net_D(concat)
 
     def forward(self, label, real, infer=False):
         label_img, real_img = self.encode_label(label, real)
@@ -237,15 +271,15 @@ class Pix2PixHD(nn.Module):
 
         # net discriminator
         # fake
-        pred_fake_pool = self.discriminate(label_img, fake_img, use_pool=True)
-        loss_D_fake = self.GANLoss(pred_fake_pool, False)
+        pred_fake_d = self.discriminate(label_img, fake_img)
+        loss_D_fake = self.GANLoss(pred_fake_d, False)
 
         # real
         pred_real = self.discriminate(label_img, real_img)
         loss_D_real = self.GANLoss(pred_real, True)
 
         # net generator
-        pred_fake = self.net_D(torch.cat((label_img, fake_img), dim=1))
+        pred_fake = self.discriminate(label_img, fake_img)
         loss_G_fake = self.GANLoss(pred_fake, True)
 
         # feature
@@ -257,6 +291,11 @@ class Pix2PixHD(nn.Module):
         # vgg
         loss_G_VGG = self.VGGLoss(fake_img, real_img) * 10
         return [loss_G_fake, loss_G_feat, loss_G_VGG, loss_D_real, loss_D_fake], None if not infer else fake_img
+
+    def infer(self, label):
+        label_img, _ = self.encode_label(label)
+        fake_img = self.net_G(label_img)
+        return fake_img
 
     def save_network(self, network, network_type, epoch, save_dir=''):
         save_filename = '%s_net_%s.pth' % (epoch, network_type)
@@ -317,33 +356,14 @@ class Vgg19(nn.Module):
     def __init__(self, requires_grad=False):
         super(Vgg19, self).__init__()
         vgg_pretrained_features = models.vgg19(pretrained=True).features
-        self.slice1 = torch.nn.Sequential()
-        self.slice2 = torch.nn.Sequential()
-        self.slice3 = torch.nn.Sequential()
-        self.slice4 = torch.nn.Sequential()
-        self.slice5 = torch.nn.Sequential()
-        for x in range(2):
-            self.slice1.add_module(str(x), vgg_pretrained_features[x])
-        for x in range(2, 7):
-            self.slice2.add_module(str(x), vgg_pretrained_features[x])
-        for x in range(7, 12):
-            self.slice3.add_module(str(x), vgg_pretrained_features[x])
-        for x in range(12, 21):
-            self.slice4.add_module(str(x), vgg_pretrained_features[x])
-        for x in range(21, 30):
-            self.slice5.add_module(str(x), vgg_pretrained_features[x])
+        self.net = vgg_pretrained_features[:30]
+
         if not requires_grad:
             for param in self.parameters():
                 param.requires_grad = False
 
-    def forward(self, X):
-        h_relu1 = self.slice1(X)
-        h_relu2 = self.slice2(h_relu1)
-        h_relu3 = self.slice3(h_relu2)
-        h_relu4 = self.slice4(h_relu3)
-        h_relu5 = self.slice5(h_relu4)
-        out = [h_relu1, h_relu2, h_relu3, h_relu4, h_relu5]
-        return out
+    def forward(self, x):
+        return self.net(x)
 
 
 class VGGLoss(nn.Module):
@@ -351,13 +371,10 @@ class VGGLoss(nn.Module):
         super(VGGLoss, self).__init__()
         self.vgg = Vgg19().cuda()
         self.criterion = nn.L1Loss()
-        self.weights = [1.0/32, 1.0/16, 1.0/8, 1.0/4, 1.0]
 
     def forward(self, x, y):
         x_vgg, y_vgg = self.vgg(x), self.vgg(y)
-        loss = 0
-        for i in range(len(x_vgg)):
-            loss += self.weights[i] * self.criterion(x_vgg[i], y_vgg[i].detach())
+        loss = self.criterion(x_vgg, y_vgg.detach())
         return loss
 
 
@@ -390,10 +407,12 @@ class GANLoss(nn.Module):
     def forward(self, x, target_is_real):
         if isinstance(x, list):
             loss = 0
-            for input_i in x:
-                pred = input_i[-1]
-                target_tensor = self.get_target_tensor(pred, target_is_real)
-                loss += self.loss(pred, target_tensor)
+            pred_list = []
+            for discri_res in x:
+                pred_list.append(discri_res[-1])
+            pred = torch.mean(torch.stack(pred_list),0)
+            target_tensor = self.get_target_tensor(pred, target_is_real)
+            loss = self.loss(pred, target_tensor)
             return loss
         else:
             target_tensor = self.get_target_tensor(x[-1], target_is_real)
